@@ -504,7 +504,7 @@ case "$INSTALL_CHOICE" in
 esac
 
 if [ -n "$PROXY_CLIENT_EXECUTABLE_PATH" ] && [ -f "$PROXY_CLIENT_EXECUTABLE_PATH" ]; then
-    if ! configure_final_steps; then
+    if ! final_config; then
         print_error "Final configuration failed."
     fi
     print_message "${GREEN}ProxyClient installation and configuration process finished.${NC}"
