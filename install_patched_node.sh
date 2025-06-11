@@ -189,6 +189,7 @@ install_dependencies() {
         fi
     done
     
+    done
     print_message "Dependencies installed successfully"
 }
 
@@ -366,14 +367,29 @@ download_sv2_bitcoin() {
     if [ -z "$EXTRACT_DIR" ]; then EXTRACT_DIR="."; fi
 
     if [ -d "$EXTRACT_DIR/bin" ]; then
-        print_message "Found bin directory, copying executables from $EXTRACT_DIR/bin/ to /usr/local/bin/"
-        cp -r "$EXTRACT_DIR/bin/"* /usr/local/bin/
+        print_message "Found bin directory, preparing to copy from $EXTRACT_DIR/bin/ to /usr/local/bin/ with -sv2tp suffix"
+        for file_path in "$EXTRACT_DIR/bin/"*; do
+            if [ -f "$file_path" ] && [ -x "$file_path" ]; then
+                local filename
+                filename=$(basename "$file_path")
+                print_message "Copying $filename to /usr/local/bin/${filename}-sv2tp"
+                cp "$file_path" "/usr/local/bin/${filename}-sv2tp"
+            fi
+        done
+        print_message "Finished copying"
     else
-        print_message "No bin directory found, looking for executables in $EXTRACT_DIR..."
-        found_executables=$(find "$EXTRACT_DIR" -maxdepth 1 -type f -executable)
-        if [ -n "$found_executables" ]; then
-            find "$EXTRACT_DIR" -maxdepth 1 -type f -executable -exec cp {} /usr/local/bin/ \;
-            print_message "Copied executables to /usr/local/bin/"
+        print_message "No bin directory found"
+        local executables_found
+        executables_found=$(find "$EXTRACT_DIR" -maxdepth 1 -type f -executable)
+
+        if [ -n "$executables_found" ]; then
+            echo "$executables_found" | while IFS= read -r file_path; do
+                local filename
+                filename=$(basename "$file_path")
+                print_message "Copying $filename to /usr/local/bin/${filename}-sv2tp"
+                cp "$file_path" "/usr/local/bin/${filename}-sv2tp"
+            done
+            print_message "Finished copying"
         else
             print_error "No executables found in the extracted archive's top level or bin directory."
             cd - > /dev/null || true; rm -rf "$TEMP_DIR"
@@ -388,27 +404,82 @@ download_sv2_bitcoin() {
 
 # Create data directory
 setup_data_directory() {
-    print_message "Setting up Bitcoin data directory..."
-    
-    # Create data directory
+    print_message "Setting up Bitcoin SV2 TP data directory..."
+
     if [ "$OS_TYPE" = "linux" ]; then
-        BITCOIN_DATA_DIR="$USER_HOME/.bitcoin"
+        BITCOIN_DATA_DIR="$USER_HOME/.bitcoin-sv2tp"
     elif [ "$OS_TYPE" = "macos" ]; then
-        BITCOIN_DATA_DIR="$BITCOIN_DATA_DIR_MACOS"
+        local base_macos_data_dir="${BITCOIN_DATA_DIR_MACOS:-$USER_HOME/Library/Application Support/Bitcoin}"
+        BITCOIN_DATA_DIR="${base_macos_data_dir}-sv2tp"
     else
         print_error "Cannot determine Bitcoin data directory for OS_TYPE: $OS_TYPE"
         exit 1
     fi
 
-    print_message "Using Bitcoin data directory: $BITCOIN_DATA_DIR"
+    print_message "Using Bitcoin SV2 TP data directory: $BITCOIN_DATA_DIR"
     if [ ! -d "$BITCOIN_DATA_DIR" ]; then
         mkdir -p "$BITCOIN_DATA_DIR"
-        chown -R $ACTUAL_USER:$ACTUAL_USER "$BITCOIN_DATA_DIR"
+        if [ -n "$ACTUAL_USER" ]; then
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$BITCOIN_DATA_DIR"
+        else
+            print_warning "ACTUAL_USER not set, skipping chown for $BITCOIN_DATA_DIR. Permissions might be incorrect."
+        fi
         chmod 750 "$BITCOIN_DATA_DIR"
-        print_message "Created Bitcoin data directory: $BITCOIN_DATA_DIR"
+        print_message "Created Bitcoin SV2 TP data directory: $BITCOIN_DATA_DIR"
     else
-        print_message "Bitcoin data directory already exists"
+        print_message "Bitcoin SV2 TP data directory already exists: $BITCOIN_DATA_DIR"
     fi
+}
+
+# Create systemd service
+# Create Bitcoin SV2 TP configuration file
+create_bitcoin_config() {
+    print_message "Creating Bitcoin SV2 TP configuration file at $BITCOIN_DATA_DIR/bitcoin.conf..."
+    if [ ! -d "$BITCOIN_DATA_DIR" ]; then
+        print_error "Bitcoin SV2 TP data directory $BITCOIN_DATA_DIR does not exist. Cannot create bitcoin.conf."
+        exit 1
+    fi
+
+    local rpc_user="sv2rpcuser"
+    local rpc_pass
+    rpc_pass=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 24) # Random password
+
+    cat > "$BITCOIN_DATA_DIR/bitcoin.conf" << EOF
+# Basic Bitcoin Core settings
+server=1
+txindex=1
+
+# RPC settings
+rpcuser=${rpc_user}
+rpcpassword=${rpc_pass}
+rpcallowip=127.0.0.1
+rpcport=18332
+
+# SV2 specific settings
+sv2=1
+sv2port=8442
+sv2bind=0.0.0.0
+sv2interval=10
+sv2feedelta=200000
+
+# Network settings (mainnet by default)
+# testnet=0
+# regtest=0
+
+# Connection settings
+port=18333
+listen=1
+# maxconnections=125
+EOF
+
+    if [ -n "$ACTUAL_USER" ]; then
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$BITCOIN_DATA_DIR/bitcoin.conf"
+    fi
+    chmod 600 "$BITCOIN_DATA_DIR/bitcoin.conf"
+
+    print_message "Bitcoin SV2 TP configuration file created: $BITCOIN_DATA_DIR/bitcoin.conf"
+    print_message "RPC User: $rpc_user"
+    print_message "RPC Password: $rpc_pass (SAVE THIS SECURELY!)"
 }
 
 # Create systemd service
@@ -417,21 +488,21 @@ create_systemd_service() {
         print_message "Skipping systemd service creation on $OS_TYPE."
         return
     fi
-    print_message "Creating systemd service for Bitcoin SV2..."
-    
-    SYSTEMD_SERVICE="/etc/systemd/system/bitcoind-sv2.service"
-    
+    print_message "Creating systemd service for Bitcoin SV2 TP..."
+
+    SYSTEMD_SERVICE="/etc/systemd/system/bitcoind-sv2tp.service" # Changed service name
+
     cat > "$SYSTEMD_SERVICE" << EOF
 [Unit]
-Description=Bitcoin SV2 Template Provider Daemon
+Description=Bitcoin SV2 Template Provider Daemon (Patched)
 After=network.target
 
 [Service]
 User=$ACTUAL_USER
 Group=$ACTUAL_USER
 Type=forking
-ExecStart=/usr/local/bin/bitcoind -daemon -sv2 -sv2port=8442 -sv2bind=0.0.0.0 -sv2interval=10 -sv2feedelta=200000
-ExecStop=/usr/local/bin/bitcoin-cli stop
+ExecStart=/usr/local/bin/bitcoind-sv2tp -daemon -conf=$BITCOIN_DATA_DIR/bitcoin.conf -datadir=$BITCOIN_DATA_DIR
+ExecStop=/usr/local/bin/bitcoin-cli-sv2tp -conf=$BITCOIN_DATA_DIR/bitcoin.conf -datadir=$BITCOIN_DATA_DIR stop
 Restart=on-failure
 TimeoutStartSec=infinity
 TimeoutStopSec=600
@@ -446,20 +517,15 @@ PrivateDevices=true
 WantedBy=multi-user.target
 EOF
 
-    # Add datadir to ExecStart if not default
-    if [ "$BITCOIN_DATA_DIR" != "$USER_HOME/.bitcoin" ]; then
-        sed -i "s|ExecStart=/usr/local/bin/bitcoind -daemon|ExecStart=/usr/local/bin/bitcoind -daemon -datadir=$BITCOIN_DATA_DIR|" "$SYSTEMD_SERVICE"
-    fi
-    
     print_message "Created systemd service: $SYSTEMD_SERVICE"
-    
+
     # Reload systemd
     systemctl daemon-reload
-    
+
     # Enable the service to start at boot
-    systemctl enable bitcoind-sv2.service
-    
-    print_message "Bitcoin SV2 service has been enabled to start at boot"
+    systemctl enable bitcoind-sv2tp.service # Changed service name
+
+    print_message "Bitcoin SV2 TP service (bitcoind-sv2tp.service) has been enabled to start at boot"
 }
 
 # Set environment variables
@@ -563,9 +629,9 @@ main() {
     print_message "Bitcoin SV2 Template Provider installation and setup completed successfully!"
 
     if [ "$OS_TYPE" = "linux" ]; then
-        print_message "You can start the Bitcoin SV2 daemon with: sudo systemctl start bitcoind-sv2.service"
-        print_message "Check the status with: sudo systemctl status bitcoind-sv2.service"
-        print_message "View logs with: sudo journalctl -u bitcoind-sv2.service -f"
+        print_message "You can start the Bitcoin SV2 daemon with: sudo systemctl start bitcoind-sv2tp.service"
+        print_message "Check the status with: sudo systemctl status bitcoind-sv2tp.service"
+        print_message "View logs with: sudo journalctl -u bitcoind-sv2tp.service -f"
     elif [ "$OS_TYPE" = "macos" ]; then
         print_message "The launchd service file is: $LAUNCHD_SERVICE_PATH"
         print_message "To load and start the service: launchctl load -w \"$LAUNCHD_SERVICE_PATH\""
@@ -581,11 +647,11 @@ main() {
     read -p "Do you want to attempt to start Bitcoin SV2 now? (y/n): " START_NOW
     if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
         if [ "$OS_TYPE" = "linux" ]; then
-            if sudo systemctl start bitcoind-sv2.service; then
+            if sudo systemctl start bitcoind-sv2tp.service; then
                 print_message "Bitcoin SV2 service has been started (systemd)."
-                print_message "Check status with: sudo systemctl status bitcoind-sv2.service"
+                print_message "Check status with: sudo systemctl status bitcoind-sv2tp.service"
             else
-                print_error "Failed to start bitcoind-sv2 service. Check logs with 'sudo journalctl -u bitcoind-sv2.service -f' or system status."
+                print_error "Failed to start bitcoind-sv2 service. Check logs with 'sudo journalctl -u bitcoind-sv2tp.service -f' or system status."
             fi
         elif [ "$OS_TYPE" = "macos" ]; then
             if [ ! -f "$LAUNCHD_SERVICE_PATH" ]; then
@@ -602,7 +668,7 @@ main() {
         fi
     else
         if [ "$OS_TYPE" = "linux" ]; then
-            print_message "You can start Bitcoin SV2 later with: sudo systemctl start bitcoind-sv2.service"
+            print_message "You can start Bitcoin SV2 later with: sudo systemctl start bitcoind-sv2tp.service"
         elif [ "$OS_TYPE" = "macos" ]; then
             print_message "You can start Bitcoin SV2 later by loading the service: launchctl load -w \"$LAUNCHD_SERVICE_PATH\""
         fi
